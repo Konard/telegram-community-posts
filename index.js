@@ -1,30 +1,29 @@
 const TelegramBot = require('node-telegram-bot-api');
 const token = require('fs').readFileSync('token', 'utf-8').trim();
+const channelUsername = 'community_posts';
 const bot = new TelegramBot(token, { polling: true });
 
 const dailyLimit = 24 * 60 * 60 * 1000; // 24 часа в миллисекундах
 
-function canPerformAction(lastActionTime) {
+async function canPerformAction(lastActionTime) {
   const currentTime = Date.now();
   return !lastActionTime || currentTime - lastActionTime >= dailyLimit;
 }
 
-async function findUserPost(channelUsername, username) {
-  const chatId = `@${channelUsername}`;
-  const searchText = `Автор: @${username}`;
+bot.onText(/\/start/, async (msg) => {
+  const chatId = msg.chat.id;
 
   try {
-    const results = await bot.searchPublicChatMessages(chatId, searchText);
-    const messages = results.messages || [];
-    return messages.find(msg => msg.text.includes(searchText));
+    await bot.getChat(`@${channelUsername}`);
   } catch (error) {
-    console.error('Error finding user post:', error);
-    return null;
+    bot.sendMessage(chatId, `
+      Канал не найден или бот не является администратором канала.
+      Создайте канал и добавьте бота в качестве администратора.
+      Имя канала должно быть: @${channelUsername}
+    `);
+    return;
   }
-}
 
-bot.onText(/\/start/, (msg) => {
-  const chatId = msg.chat.id;
   const opts = {
     reply_markup: {
       inline_keyboard: [
@@ -39,6 +38,7 @@ bot.onText(/\/start/, (msg) => {
       ]
     }
   };
+
   bot.sendMessage(chatId, 'Выберите действие:', opts);
 });
 
@@ -53,7 +53,7 @@ bot.on('callback_query', async (callbackQuery) => {
   const userLiftTimes = {};  
 
   if (action === 'post_message') {
-    if (!canPerformAction(userPostTimes[userId])) {
+    if (!await canPerformAction(userPostTimes[userId])) {
       bot.sendMessage(msg.chat.id, "Вы можете опубликовать только одно сообщение в день.");
       return;
     }
@@ -62,37 +62,46 @@ bot.on('callback_query', async (callbackQuery) => {
       bot.once('message', async (msg) => {
         const messageText = msg.text;
 
-        await bot.sendMessage('@YOUR_CHANNEL_USERNAME', `${messageText}\n\nАвтор: @${username}`);
+        await bot.sendMessage(`@${channelUsername}`, `${messageText}\n\n@${username}`);
         userPostTimes[userId] = Date.now();
         bot.sendMessage(msg.chat.id, "Ваше сообщение опубликовано!");
       });
     });
 
   } else if (action === 'lift_message') {
-    if (!canPerformAction(userLiftTimes[userId])) {
-      bot.sendMessage(msg.chat.id, "Вы можете поднять своё сообщение только раз в день.");
-      return;
-    }
+    const chatId = `@${channelUsername}`;
+    const searchText = `@${username}`;
 
-    const userPost = await findUserPost('YOUR_CHANNEL_USERNAME', username);
+    try {
+      const results = await bot.searchPublicChatMessages(chatId, searchText);
+      const messages = results.messages || [];
+      const userPost = messages.find(m => m.text.endsWith(searchText));
 
-    if (!userPost) {
-      bot.sendMessage(msg.chat.id, "Ваше сообщение не найдено в канале.");
-      return;
-    }
+      if (!await canPerformAction(userLiftTimes[userId])) {
+        bot.sendMessage(msg.chat.id, "Вы можете поднять своё сообщение только раз в день.");
+        return;
+      }
 
-    bot.deleteMessage('@YOUR_CHANNEL_USERNAME', userPost.message_id).then(() => {
-      bot.sendMessage(msg.chat.id, "Введите текст вашего сообщения:").then(() => {
-        bot.once('message', async (msg) => {
-          const messageText = msg.text;
+      if (!userPost) {
+        bot.sendMessage(msg.chat.id, "Ваше сообщение не найдено в канале.");
+        return;
+      }
 
-          await bot.sendMessage('@YOUR_CHANNEL_USERNAME', `${messageText}\n\nАвтор: @${username}`);
-          userLiftTimes[userId] = Date.now();
-          bot.sendMessage(msg.chat.id, "Ваше сообщение поднято!");
+      bot.deleteMessage(chatId, userPost.message_id).then(() => {
+        bot.sendMessage(msg.chat.id, "Введите текст вашего сообщения:").then(() => {
+          bot.once('message', async (msg) => {
+            const messageText = msg.text;
+
+            await bot.sendMessage(chatId, `${messageText}\n\n@${username}`);
+            userLiftTimes[userId] = Date.now();
+            bot.sendMessage(msg.chat.id, "Ваше сообщение поднято!");
+          });
         });
+      }).catch(() => {
+        bot.sendMessage(msg.chat.id, "Не удалось поднять сообщение, попробуйте позже.");
       });
-    }).catch(() => {
-      bot.sendMessage(msg.chat.id, "Не удалось поднять сообщение, попробуйте позже.");
-    });
+    } catch (error) {
+      bot.sendMessage(msg.chat.id, "Ошибка при поиске сообщения: " + error.message);
+    }
   }
 });
